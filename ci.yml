@@ -1,0 +1,277 @@
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,209 @@
++name: CI/CD Pipeline
++
++on:
++  push:
++    branches: [ main, master ] # Adjust to your default branch(es)
++  pull_request:
++    branches: [ main, master ]
++
++env:
++  # Define common environment variables here, similar to Jenkins 'environment' block
++  JAVA_VERSION: '11' # Example: Set your project's Java version
++  # MAVEN_VERSION: '3.8.6' # Optional: if you need a specific Maven version
++  # SONAR_PROJECT_KEY: "your_project_key_from_sonarqube" # Example
++
++jobs:
++  build_and_unit_test:
++    name: Build and Unit Test
++    runs-on: ubuntu-latest # Corresponds to Jenkins agent { label 'Node01' }
++
++    steps:
++      - name: Checkout Git repository
++        uses: actions/checkout@v4
++
++      - name: Set up JDK ${{ env.JAVA_VERSION }}
++        uses: actions/setup-java@v4
++        with:
++          java-version: ${{ env.JAVA_VERSION }}
++          distribution: 'temurin' # Or 'adopt', 'zulu', etc.
++          cache: 'maven' # Caches Maven dependencies
++
++      # Optional: Setup specific Maven version if needed.
++      # Otherwise, the version bundled with the runner or setup-java will be used.
++      # - name: Set up Maven
++      #   uses: stCarolas/setup-maven@v4.5 # A community action for Maven setup
++      #   with:
++      #     maven-version: ${{ env.MAVEN_VERSION }}
++
++      - name: Build with Maven
++        # The -B flag is for batch mode, recommended for CI
++        # Note: -Dmaven.test.failure.ignore is carried over from your Jenkinsfile.
++        # Consider removing it if you want the build to fail on test failures.
++        run: mvn -B -Dmaven.test.failure.ignore clean package
++
++      - name: Publish Unit Test Results (Surefire reports)
++        uses: actions/upload-artifact@v4
++        if: always() # Uploads reports even if the build step has test failures (due to -Dmaven.test.failure.ignore)
++        with:
++          name: surefire-reports
++          path: '**/target/surefire-reports/TEST-*.xml'
++
++      - name: Archive JAR artifact
++        uses: actions/upload-artifact@v4
++        with:
++          name: application-jar
++          path: target/*.jar # Adjust if your JAR name/path is different
++
++  automation_tests:
++    name: Automation Tests
++    runs-on: ubuntu-latest # Or a specific runner if UI tests need a display server
++    needs: build_and_unit_test # This job runs after build_and_unit_test completes
++    strategy:
++      matrix:
++        browser: [firefox, chrome]
++      fail-fast: false # Allows other matrix jobs to continue if one fails
++
++    steps:
++      - name: Checkout Git repository
++        uses: actions/checkout@v4
++
++      # If your automation tests need the built JAR:
++      # - name: Download application JAR
++      #   uses: actions/download-artifact@v4
++      #   with:
++      #     name: application-jar
++      #     path: target/
++
++      - name: Run Automated Tests on ${{ matrix.browser }}
++        run: |
++          echo "Setting up environment for ${{ matrix.browser }}..."
++          # Add steps to install browsers if not available on the runner
++          # For example, for Firefox on Ubuntu:
++          # if [ "${{ matrix.browser }}" == "firefox" ]; then
++          #   sudo apt-get update && sudo apt-get install -y firefox
++          # fi
++          echo "Automation Testing using ${{ matrix.browser }} browser..."
++          # Add your actual test execution commands here
++
++  code_analysis:
++    name: SonarQube Analysis
++    runs-on: ubuntu-latest
++    needs: build_and_unit_test
++
++    steps:
++      - name: Checkout Git repository (full depth for SonarQube)
++        uses: actions/checkout@v4
++        with:
++          fetch-depth: 0 # SonarQube needs full history
++
++      - name: Set up JDK ${{ env.JAVA_VERSION }} for SonarQube
++        uses: actions/setup-java@v4
++        with:
++          java-version: ${{ env.JAVA_VERSION }}
++          distribution: 'temurin'
++
++      # Download build artifacts if Sonar analysis depends on them (e.g., JaCoCo reports, class files)
++      # - name: Download Surefire reports
++      #   uses: actions/download-artifact@v4
++      #   with:
++      #     name: surefire-reports
++      #     path: target/surefire-reports
++
++      - name: SonarQube Scan
++        uses: sonarsource/sonarqube-scan-action@master # Use a specific version in production
++        env:
++          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }} # Store in GitHub Secrets
++          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }} # Store in GitHub Secrets
++        # with:
++          # args: >
++          #   -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }}
++          #   -Dsonar.sources=.
++          #   -Dsonar.java.binaries=target/classes # Adjust as necessary
++          #   -Dsonar.junit.reportsPath=target/surefire-reports
++          #   # If you generate JaCoCo reports for coverage:
++          #   # -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
++
++      # The sonarqube-scan-action can often be configured to wait for the Quality Gate.
++      # Alternatively, use a dedicated action to check the Quality Gate status:
++      # - name: SonarQube Quality Gate check
++      #   uses: sonarsource/sonarqube-quality-gate-action@master # Use a specific version
++      #   timeout-minutes: 5
++      #   env:
++      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
++      #     SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }} # May not be needed if scan action sets it
++
++  publish_to_artifactory:
++    name: Publish to Artifactory
++    runs-on: ubuntu-latest
++    needs: code_analysis # Or build_and_unit_test, depending on your flow
++    # if: github.ref == 'refs/heads/main' # Example: only publish from the main branch
++
++    steps:
++      - name: Checkout Git repository
++        uses: actions/checkout@v4
++
++      - name: Set up JDK ${{ env.JAVA_VERSION }}
++        uses: actions/setup-java@v4
++        with:
++          java-version: ${{ env.JAVA_VERSION }}
++          distribution: 'temurin'
++          cache: 'maven'
++
++      - name: Download application JAR
++        uses: actions/download-artifact@v4
++        with:
++          name: application-jar
++          path: target/
++
++      - name: Set up JFrog CLI
++        uses: jfrog/setup-jfrog-cli@v3 # Use latest or specific version
++        env:
++          # Configure JFrog CLI with credentials from GitHub Secrets
++          JFROG_CLI_SERVER_ID_DEFAULT: "your-artifactory-server-id" # Define your Artifactory server ID
++          JFROG_CLI_URL: ${{ secrets.ARTIFACTORY_URL }} # e.g., https://yourcompany.jfrog.io/artifactory
++          JFROG_CLI_USER: ${{ secrets.ARTIFACTORY_USER }}
++          JFROG_CLI_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
++          # Alternatively, use an access token:
++          # JFROG_CLI_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
++
++      - name: Publish Artifacts and Build Info to Artifactory
++        run: |
++          echo "Configuring JFrog CLI for Maven deployment..."
++          # This step configures Maven to resolve/deploy from Artifactory using JFrog CLI
++          # Replace repo names and server ID with your Artifactory setup
++          # jf mvn-config --repo-deploy-releases libs-release-local --repo-deploy-snapshots libs-snapshot-local --server-id-deploy your-artifactory-server-id
++          # jf mvn-config --repo-resolve-releases libs-release --repo-resolve-snapshots libs-snapshot --server-id-resolve your-artifactory-server-id
++
++          echo "Deploying to Artifactory using Maven..."
++          # Assuming your pom.xml has <distributionManagement> configured for Artifactory
++          # The Jenkinsfile ran 'clean install'. Here, we assume the JAR is already built and downloaded.
++          # If you want Maven to handle the deployment of the pre-built JAR:
++          # mvn deploy:deploy-file -Durl=${{ secrets.ARTIFACTORY_URL }}/libs-release-local \
++          #                        -DrepositoryId=your-artifactory-server-id \
++          #                        -Dfile=target/your-artifact-name.jar \
++          #                        -DpomFile=pom.xml \
++          #                        -Dpackaging=jar \
++          #                        -DgeneratePom=false \
++          #                        -Dmaven.test.skip=true
++
++          # Or, using JFrog CLI to upload the artifact and publish build info:
++          APP_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
++          ARTIFACT_FILE_NAME=$(ls target/*.jar | head -n 1) # Gets the first JAR in target/
++
++          jf rt u --build-name="${{ github.repository }}" --build-number="${{ github.run_id }}" \
++            "${ARTIFACT_FILE_NAME}" "libs-release-local/" \
++            --target-props="status=released;version=${APP_VERSION}"
++
++          jf rt bp "${{ github.repository }}" "${{ github.run_id }}"
++        working-directory: ./ # Ensure mvn commands run from the project root
++
++  security_scan:
++    name: Security Scanning
++    runs-on: ubuntu-latest
++    needs: build_and_unit_test # Or after deployment to a staging environment
++
++    steps:
++      - name: Perform Security Scan
++        run: |
++          echo "Security Scanning (dynamic analysis using Burp Suite)..."
++          # Add your actual security scanning commands here.
++          # This might involve setting up Burp Suite (e.g., via Docker) or other DAST tools.
++
++  deploy_application:
++    name: Deploy Application
++    runs-on: ubuntu-latest # Or a specific runner for deployment
++    needs: [publish_to_artifactory, security_scan] # Example dependencies
++    # if: github.ref == 'refs/heads/main' && success() # Example: only deploy from main on success
++
++    steps:
++      # - name: Download application artifact (if deploying from GitHub Artifacts or Artifactory)
++      #   # ...
++
++      - name: Deploy code
++        run: |
++          echo "Deploy code using Configuration Manager..."
++          # Add your actual deployment commands here.
++          # This will be highly specific to your deployment target and tools (e.g., Ansible, kubectl, scp, custom scripts).
++
++```
+
+### Key Mappings and Considerations:
+
+1.  **Pipeline Structure**:
+    *   Jenkins `pipeline {}` block maps to the overall GitHub Actions workflow file.
+    *   Jenkins `agent { label 'Node01' }` maps to `runs-on: ubuntu-latest` in GitHub Actions. If `Node01` has specific software, you might need to install it in a step, use a Docker container, or use a self-hosted runner.
+    *   Jenkins `stages {}` and `stage {}` map to `jobs:` in GitHub Actions. Each job can be seen as a major stage. Steps within a job run sequentially.
+    *   Dependencies between Jenkins stages are managed by their order; in GitHub Actions, you use the `needs:` keyword to define job dependencies.
+
+2.  **Tools and Environment**:
+    *   Jenkins `tools {}` (for JDK, Maven) is handled by setup actions like `actions/setup-java@v4` (which can also set up Maven or you can use a dedicated Maven setup action).
+    *   Jenkins `environment {}` maps to the `env:` block at the workflow or job level in GitHub Actions.
+
+3.  **Steps and Commands**:
+    *   `git '...'`: Replaced by `uses: actions/checkout@v4`.
+    *   `sh "mvn ..."`: Replaced by `run: mvn ...`. The `-B` flag is added for batch mode, which is good practice in CI.
+    *   `junit '...'`: Test reports are uploaded using `uses: actions/upload-artifact@v4`. For visual reporting, you might explore actions from the GitHub Marketplace (e.g., `dorny/test-reporter`).
+    *   `archive 'target/*.jar'` (or `archiveArtifacts`): Replaced by `uses: actions/upload-artifact@v4`.
+    *   `parallel {}`: Mapped using the `strategy: matrix:` for the automation tests, allowing tests for Firefox and Chrome to run as parallel instances of the same job definition. Alternatively, you could define two separate jobs.
+    *   `bat 'echo ...'`: Replaced by `run: echo ...`. GitHub Actions `run` commands use the default shell of the runner (`bash` on Linux, `pwsh` on Windows).
+
+4.  **Integrations**:
+    *   **SonarQube**: Use `sonarsource/sonarqube-scan-action`. The quality gate check (`waitForQualityGate`) can often be handled by this action's configuration or by a separate `sonarsource/sonarqube-quality-gate-action`. Credentials (`SONAR_TOKEN`, `SONAR_HOST_URL`) should be stored as GitHub Secrets.
+    *   **Artifactory**: Use `jfrog/setup-jfrog-cli` and then JFrog CLI commands (`jf rt ...`, `jf mvn ...`), or other dedicated JFrog actions. The Jenkins Artifactory plugin steps (`rtServer`, `rtMavenDeployer`, etc.) are mapped to CLI configurations and commands. Credentials should be GitHub Secrets. The example shows uploading a pre-built JAR and publishing build info; for a full Maven deployment, you'd typically configure your `pom.xml` and use `mvn deploy`.
+
+5.  **Placeholders**:
+    *   The actual commands for "Automation Test", "Security Scanning", and "Deploy" stages are still placeholders (`echo '...'`). You'll need to replace these with your specific tool commands and scripts.
+
+6.  **Credentials**:
+    *   All sensitive information (like `CREDENTIALS`, `SONAR_LOGIN_TOKEN_CRED_ID`, Artifactory credentials) must be stored as **GitHub Secrets** (Settings > Secrets and variables > Actions > New repository secret) and accessed via `${{ secrets.YOUR_SECRET_NAME }}`.
+
+7.  **`maven.test.failure.ignore`**:
+    *   This flag is carried over from your Jenkinsfile. In GitHub Actions, if you want the workflow to fail when tests fail (which is common practice), you should remove this flag from the `mvn package` command. The `if: always()` on the artifact upload step ensures reports are still collected.
+
+### To Make This Work:
+
+1.  **Create the Workflow File**: Save the YAML content above as `.github/workflows/ci.yml` (or any other `.yml` file) in your repository.
+2.  **Configure Secrets**: Add necessary secrets like `SONAR_TOKEN`, `SONAR_HOST_URL`, `ARTIFACTORY_URL`, `ARTIFACTORY_USER`, `ARTIFACTORY_PASSWORD` to your GitHub repository's secrets.
+3.  **Update Placeholders**:
+    *   Fill in the actual commands for your automation tests, security scans, and deployment steps.
+    *   Adjust SonarQube project keys and any specific arguments.
+    *   Configure Artifactory server IDs, repository names, and paths according to your setup.
+    *   Ensure your `pom.xml` is correctly configured if you intend to use `mvn deploy` for Artifactory.
+4.  **Test**: Push a commit to trigger the workflow and iterate as needed.
+
+This GitHub Actions workflow provides a solid foundation. You'll likely need to tweak it based on the specifics of your tools, environment, and deployment processes. Good luck!
